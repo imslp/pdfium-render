@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <script src="pdfium.js"></script>
+  <script src="pdfium_render_wasm.js"></script>
+</head>
+
+<body>
+  <div style="display: flex; gap: 20px;">
+    <div>
+      <canvas id="canvas1" style="max-width: 100%; height: auto; border: 1px solid black;"></canvas>
+      <div>
+        <button data-canvas="canvas1" data-file-name="test-1.pdf">Load PDF 1</button>
+        <button class="next-page" data-canvas="canvas1">Next Page</button>
+      </div>
+    </div>
+    <div>
+      <canvas id="canvas2" style="max-width: 100%; height: auto; border: 1px solid black;"></canvas>
+      <div>
+        <button data-canvas="canvas2" data-file-name="test-2.pdf">Load PDF 2</button>
+        <button class="next-page" data-canvas="canvas2">Next Page</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Store document instances and their states
+    const documents = new Map();
+
+    class PDFViewer {
+      constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.context = this.canvas.getContext("2d");
+        this.currentPage = 0;
+        this.scale = 1;
+        this.doc = null;
+      }
+
+      async loadDocument(blob) {
+        try {
+          if (this.doc) {
+            this.doc.destroy();
+          }
+          this.currentPage = 0;
+          this.doc = await get_document(blob);
+          await this.renderCurrentPage();
+          return await this.doc.get_page_count();
+        } catch (error) {
+          console.error("Error loading document:", error);
+          throw error;
+        }
+      }
+
+      async renderCurrentPage() {
+        if (!this.doc) return;
+
+        try {
+          const size = await this.doc.get_page_raw_size(this.currentPage);
+          this.canvas.width = size.width * this.scale;
+          this.canvas.height = size.height * this.scale;
+          
+          const imageData = await this.doc.get_page_image_data(this.currentPage, this.scale);
+          this.context.putImageData(imageData, 0, 0);
+        } catch (error) {
+          console.error("Error rendering page:", error);
+          throw error;
+        }
+      }
+
+      async nextPage() {
+        if (!this.doc) return;
+        
+        try {
+          const pageCount = await this.doc.get_page_count();
+          this.currentPage++;
+          if (this.currentPage >= pageCount) {
+            this.currentPage = 0;
+          }
+          
+          await this.renderCurrentPage();
+        } catch (error) {
+          console.error("Error changing page:", error);
+          throw error;
+        }
+      }
+
+      destroy() {
+        if (this.doc) {
+          this.doc.destroy();
+          this.doc = null;
+        }
+      }
+    }
+
+    // Initialize WASM
+    PDFiumModule().then(async pdfiumModule => {
+      const { initialize_pdfium_render, get_document } = wasm_bindgen;
+
+      await wasm_bindgen('pdfium_render_wasm_bg.wasm').then(async rustModule => {
+        console.assert(
+          initialize_pdfium_render(
+            pdfiumModule,
+            rustModule,
+            false,
+          ),
+          "Initialization of pdfium-render failed!"
+        );
+
+        // Setup viewers after WASM is initialized
+        document.querySelectorAll("[data-canvas][data-file-name]").forEach(button => {
+          const canvasId = button.getAttribute("data-canvas");
+          if (!documents.has(canvasId)) {
+            documents.set(canvasId, new PDFViewer(canvasId));
+          }
+
+          button.addEventListener("click", async () => {
+            try {
+              const viewer = documents.get(canvasId);
+              const file = button.getAttribute("data-file-name");
+              const response = await fetch(`./${file}`);
+              const pdfBlob = await response.blob();
+
+              const start = performance.now();
+              const pageCount = await viewer.loadDocument(pdfBlob);
+              const end = performance.now();
+              
+              console.log(`Time taken: ${end - start}ms`);
+              console.log(`PDF has ${pageCount} pages`);
+            } catch (error) {
+              console.error("Error loading PDF:", error);
+            }
+          });
+        });
+
+        document.querySelectorAll(".next-page").forEach(button => {
+          button.addEventListener("click", async () => {
+            try {
+              const canvasId = button.getAttribute("data-canvas");
+              const viewer = documents.get(canvasId);
+              if (viewer) {
+                await viewer.nextPage();
+              }
+            } catch (error) {
+              console.error("Error changing page:", error);
+            }
+          });
+        });
+      });
+    });
+
+    // Cleanup on page unload
+    window.addEventListener("unload", () => {
+      for (const viewer of documents.values()) {
+        viewer.destroy();
+      }
+    });
+  </script>
+</body>
+
+</html>
